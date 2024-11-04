@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import exifread
 import httpx
+import magic
 from PIL import Image, ImageOps
 
 logger = logging.getLogger("bma_client")
@@ -149,6 +150,9 @@ class BmaClient:
             )
             width, height = rotated.size
 
+        with path.open("rb") as fh:
+            mimetype = magic.from_buffer(fh.read(2048), mime=True)
+
         # open file
         with path.open("rb") as fh:
             files = {"f": (path.name, fh)}
@@ -158,6 +162,7 @@ class BmaClient:
                 "license": file_license,
                 "width": width,
                 "height": height,
+                "mimetype": mimetype,
             }
             # doit
             r = self.client.post(
