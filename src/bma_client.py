@@ -131,8 +131,8 @@ class BmaClient:
     def upload_file(self, path: Path, attribution: str, file_license: str) -> dict[str, dict[str, str]]:
         """Upload a file."""
         # is this an image?
-        for _mimetype, extensions in self.settings["filetypes"]["images"].values():
-            extension = path.suffix[1:]
+        extension = path.suffix[1:]
+        for extensions in self.settings["filetypes"]["images"].values():
             if extension.lower() in extensions:
                 # this file has the extension of a supported image
                 logger.debug(f"Extension {extension} is supported...")
