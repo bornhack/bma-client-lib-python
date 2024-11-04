@@ -122,7 +122,7 @@ class BmaClient:
             r = self.client.post(url, data=json.dumps(data)).raise_for_status()
             response = r.json()["bma_response"]
         except httpx.HTTPStatusError as e:
-            if e.response.status_code == HTTPStatus.NotFound:
+            if e.response.status_code == HTTPStatus.NOT_FOUND:
                 response = []
             else:
                 raise
@@ -194,30 +194,27 @@ class BmaClient:
         logger.debug("Rotating image (if needed)...")
         start = time.time()
         image = ImageOps.exif_transpose(image)  # creates a copy with rotation normalised
-        logger.debug(f"Rotating image took {time.time() - start} seconds, image is now {image.size}")
+        orig_ar = Fraction(*image.size)
+        logger.debug(f"Rotating image took {time.time() - start} seconds, image is now {image.size} original AR is {orig_ar}")
 
         logger.debug("Getting exif metadata from image...")
         start = time.time()
         exif = image.getexif()
         logger.debug(f"Getting exif data took {time.time() - start} seconds")
 
-        logger.debug("Calculating size and ratio...")
-        start = time.time()
-        if job["aspect_ratio_numerator"] and job["aspect_ratio_denominator"]:
-            # height is calculated based on requested width and AR
-            ratio = Fraction(job["aspect_ratio_numerator"], job["aspect_ratio_denominator"])
-            height = math.floor(job["width"] / ratio)
-        else:
-            # height is a fraction of width, keeping AR the same
-            ratio = None
-            height = math.floor(job["width"] / Fraction(*image.size))
-        size = math.floor(job["width"]), math.floor(height)
-        logger.debug(f"Calculating size and AR took {time.time() - start} seconds")
+        size = job["width"], job["height"]
+        ratio = Fraction(*size)
 
-        logger.debug(f"Desired image size is {size}, AR {ratio}, converting image...")
+        if job['custom_aspect_ratio']:
+            orig = "custom"
+        else:
+            orig = "original"
+            if orig_ar != ratio:
+                orig += "(ish)"
+        logger.debug(f"Desired image size is {size}, aspect ratio: {ratio} ({orig}), converting image...")
         start = time.time()
         # custom AR or not?
-        if ratio:
+        if job['custom_aspect_ratio']:
             image = ImageOps.fit(image, size)
         else:
             image.thumbnail(size)
