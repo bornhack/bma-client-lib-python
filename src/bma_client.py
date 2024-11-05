@@ -84,7 +84,7 @@ class BmaClient:
         r = self.client.get(
             self.base_url + "/api/v1/json/jobs/settings/",
         ).raise_for_status()
-        self.settings = r.json()["bma_response"]["settings"]
+        self.settings = r.json()["bma_response"]
         return r.json()
 
     def get_jobs(self, job_filter: str = "?limit=0") -> list[dict[str, str]]:
