@@ -16,5 +16,5 @@ jobs:
         channel: "#bornhack-website"
         nickname: "webteambot"
         message: |-
-          ${{ github.actor }} pushed new BMA commits: ${{ github.event.compare }} - latest commit msg: "${{ github.event.head_commit.message }}"
+          ${{ github.actor }} pushed new bma-client-python commits: ${{ github.event.compare }} - latest commit msg: "${{ github.event.head_commit.message }}"
 ...
