@@ -14,6 +14,9 @@ import exifread
 import httpx
 import magic
 from PIL import Image, ImageOps
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version
+
 
 logger = logging.getLogger("bma_client")
 
@@ -26,6 +29,12 @@ JobResult: TypeAlias = ImageConversionJobResult | ExifExtractionJobResult
 
 # maybe these should come from server settings
 SKIP_EXIF_TAGS = ["JPEGThumbnail", "TIFFThumbnail", "Filename"]
+
+# get version
+try:
+    __version__ = version("bma-client-lib")
+except PackageNotFoundError:
+    __version__ = "0.0.0"
 
 
 class BmaBearerAuth(httpx.Auth):
@@ -62,6 +71,7 @@ class BmaClient:
         self.path = path
         self.skip_exif_tags = SKIP_EXIF_TAGS
         self.get_server_settings()
+        self.__version__ = __version__
 
     def update_access_token(self) -> None:
         """Set or update self.access_token using self.refresh_token."""
@@ -119,7 +129,10 @@ class BmaClient:
         url = self.base_url + "/api/v1/json/jobs/assign/"
         if file_uuid:
             url += f"?file_uuid={file_uuid}"
-        data = {"client_uuid": self.uuid}
+        data = {
+            "client_uuid": self.uuid,
+            "client_version": "bma-client-lib {__version__}",
+        }
         try:
             r = self.client.post(url, json=data).raise_for_status()
             response = r.json()["bma_response"]
@@ -277,11 +290,12 @@ class BmaClient:
         # build metadata
         data = {
             "client_uuid": self.uuid,
+            "client_version": "bma-client-lib {__version__}",
         }
         # doit
         r = self.client.post(
             self.base_url + f"/api/v1/json/jobs/{job_uuid}/result/",
-            data={"assign": json.dumps(data)},
+            data={"client": json.dumps(data)},
             files=files,
         ).raise_for_status()
         t = time.time() - start
