@@ -6,6 +6,7 @@ import time
 import uuid
 from fractions import Fraction
 from http import HTTPStatus
+from importlib.metadata import PackageNotFoundError, version
 from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeAlias
@@ -14,9 +15,6 @@ import exifread
 import httpx
 import magic
 from PIL import Image, ImageOps
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version
-
 
 logger = logging.getLogger("bma_client")
 
@@ -325,3 +323,14 @@ class BmaClient:
                 grouped[group] = {}
             grouped[group][key] = str(value)
         return grouped
+
+    def create_album(self, file_uuids: list[uuid.UUID], title: str, description: str) -> dict[str, str]:
+        """Create an album."""
+        url = self.base_url + "/api/v1/json/albums/create/"
+        data = {
+            "files": file_uuids,
+            "title": title,
+            "description": description,
+        }
+        r = self.client.post(url, json=data).raise_for_status()
+        return r.json()["bma_response"]
