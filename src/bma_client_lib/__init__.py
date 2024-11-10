@@ -1,1 +1,1 @@
-from .bma_client_lib import BmaClient
+from .bma_client import BmaClient

@@ -15,6 +15,7 @@ dependencies = [
     "exifread==3.0.0",
     "httpx==0.27.2",
     "pillow==11.0.0",
+    "python-magic==0.4.27",
 ]
 name = "bma-client-lib"
 description = "BornHack Media Archive Client Library"
