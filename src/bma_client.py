@@ -2,13 +2,13 @@
 
 import json
 import logging
-import math
 import time
 import uuid
 from fractions import Fraction
 from http import HTTPStatus
+from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeAlias
 
 import exifread
 import httpx
@@ -18,9 +18,11 @@ from PIL import Image, ImageOps
 logger = logging.getLogger("bma_client")
 
 if TYPE_CHECKING:
-    from io import BytesIO
-
     from django.http import HttpRequest
+
+ImageConversionJobResult: TypeAlias = tuple[Image.Image, Image.Exif]
+ExifExtractionJobResult: TypeAlias = dict[str, dict[str, str]]
+JobResult: TypeAlias = ImageConversionJobResult | ExifExtractionJobResult
 
 # maybe these should come from server settings
 SKIP_EXIF_TAGS = ["JPEGThumbnail", "TIFFThumbnail", "Filename"]
@@ -91,7 +93,7 @@ class BmaClient:
         """Get a filtered list of the jobs this user has access to."""
         r = self.client.get(self.base_url + f"/api/v1/json/jobs/{job_filter}").raise_for_status()
         response = r.json()["bma_response"]
-        logger.debug(f"Returning {len(response)} jobs")
+        logger.debug(f"Returning {len(response)} jobs with filter {job_filter}")
         return response
 
     def get_file_info(self, file_uuid: uuid.UUID) -> dict[str, str]:
@@ -99,12 +101,12 @@ class BmaClient:
         r = self.client.get(self.base_url + f"/api/v1/json/files/{file_uuid}/").raise_for_status()
         return r.json()["bma_response"]
 
-    def download(self, file_uuid: uuid.UUID) -> bytes:
+    def download(self, file_uuid: uuid.UUID) -> dict[str, str]:
         """Download a file from BMA."""
         info = self.get_file_info(file_uuid=file_uuid)
         path = self.path / info["filename"]
         if not path.exists():
-            url = self.base_url + info["links"]["downloads"]["original"]
+            url = self.base_url + info["links"]["downloads"]["original"]  # type: ignore[index]
             logger.debug(f"Downloading file {url} ...")
             r = self.client.get(url).raise_for_status()
             logger.debug(f"Done downloading {len(r.content)} bytes, saving to {path}")
@@ -119,39 +121,44 @@ class BmaClient:
             url += f"?file_uuid={file_uuid}"
         data = {"client_uuid": self.uuid}
         try:
-            r = self.client.post(url, data=json.dumps(data)).raise_for_status()
+            r = self.client.post(url, json=data).raise_for_status()
             response = r.json()["bma_response"]
         except httpx.HTTPStatusError as e:
             if e.response.status_code == HTTPStatus.NOT_FOUND:
                 response = []
             else:
                 raise
-        logger.debug(f"Returning {len(response)} jobs")
+        logger.debug(f"Returning {len(response)} assigned jobs")
         return response
 
     def upload_file(self, path: Path, attribution: str, file_license: str) -> dict[str, dict[str, str]]:
         """Upload a file."""
-        # is this an image?
-        extension = path.suffix[1:]
-        for extensions in self.settings["filetypes"]["images"].values():
-            if extension.lower() in extensions:
-                # this file has the extension of a supported image
-                logger.debug(f"Extension {extension} is supported...")
-                break
-        else:
-            # file type not supported
-            raise ValueError(f"{path.suffix}")
-
-        # get image dimensions
-        with Image.open(path) as image:
-            rotated = ImageOps.exif_transpose(image)  # creates a copy with rotation normalised
-            logger.debug(
-                f"Image has exif rotation info, using post-rotate size {rotated.size} instead of raw size {image.size}"
-            )
-            width, height = rotated.size
-
+        # get mimetype
         with path.open("rb") as fh:
             mimetype = magic.from_buffer(fh.read(2048), mime=True)
+
+        # find filetype (image, video, audio or document) from mimetype
+        for filetype in self.settings["filetypes"]:
+            if mimetype in self.settings["filetypes"][filetype]:
+                break
+        else:
+            # unsupported mimetype
+            logger.error(
+                f"Mimetype {mimetype} is not supported by this BMA server. Supported types {self.settings['filetypes']}"
+            )
+            raise ValueError(mimetype)
+
+        if filetype == "image":
+            # get image dimensions
+            with Image.open(path) as image:
+                rotated = ImageOps.exif_transpose(image)  # creates a copy with rotation normalised
+                if rotated is None:
+                    raise ValueError("Rotation")
+                logger.debug(
+                    f"Image has exif rotation info, using post-rotate size {rotated.size}"
+                    f"instead of raw size {image.size}"
+                )
+                width, height = rotated.size
 
         # open file
         with path.open("rb") as fh:
@@ -160,10 +167,15 @@ class BmaClient:
             data = {
                 "attribution": attribution,
                 "license": file_license,
-                "width": width,
-                "height": height,
                 "mimetype": mimetype,
             }
+            if filetype == "image":
+                data.update(
+                    {
+                        "width": width,
+                        "height": height,
+                    }
+                )
             # doit
             r = self.client.post(
                 self.base_url + "/api/v1/json/files/upload/",
@@ -172,18 +184,47 @@ class BmaClient:
             )
             return r.json()
 
-    def handle_job(self, job: dict[str, str], orig: Path) -> tuple[Image.Image, Image.Exif]:
-        """Do the thing and return the result."""
+    def handle_job(self, job: dict[str, str], orig: Path) -> None:
+        """Do the thing and upload the result."""
+        result: JobResult
+        # get the result of the job
         if job["job_type"] == "ImageConversionJob":
-            return self.handle_image_conversion_job(job=job, orig=orig)
-        if job["job_type"] == "ImageExifExtractionJob":
-            return self.get_exif(orig)
-        logger.error(f"Unsupported job type {job['job_type']}")
-        return None
+            result = self.handle_image_conversion_job(job=job, orig=orig)
+            filename = job["job_uuid"] + "." + job["filetype"].lower()
+        elif job["job_type"] == "ImageExifExtractionJob":
+            result = self.get_exif(fname=orig)
+            filename = "exif.json"
+        else:
+            logger.error(f"Unsupported job type {job['job_type']}")
 
-    def handle_image_conversion_job(self, job: dict[str, str], orig: Path) -> tuple[Image.Image, Image.Exif]:
+        self.write_and_upload_result(job=job, result=result, filename=filename)
+
+    def write_and_upload_result(self, job: dict[str, str], result: JobResult, filename: str) -> None:
+        """Encode and write the job result to a buffer, then upload."""
+        with BytesIO() as buf:
+            if job["job_type"] == "ImageConversionJob":
+                image, exif = result
+                if not isinstance(image, Image.Image) or not isinstance(exif, Image.Exif):
+                    raise ValueError("Fuck")
+                # apply format specific encoding options
+                kwargs = {}
+                if job["mimetype"] in self.settings["encoding"]["images"]:
+                    # this format has custom encoding options, like quality/lossless, apply them
+                    kwargs.update(self.settings["encoding"]["images"][job["mimetype"]])
+                    logger.debug(f"Format {job['mimetype']} has custom encoding settings, kwargs is now: {kwargs}")
+                else:
+                    logger.debug(f"No custom settings for format {job['mimetype']}")
+                image.save(buf, format=job["filetype"], exif=exif, **kwargs)
+            elif job["job_type"] == "ImageExifExtractionJob":
+                logger.debug(f"Got exif data {result}")
+                buf.write(json.dumps(result).encode())
+            else:
+                logger.error("Unsupported job type")
+                raise RuntimeError(job["job_type"])
+            self.upload_job_result(job_uuid=uuid.UUID(job["job_uuid"]), buf=buf, filename=filename)
+
+    def handle_image_conversion_job(self, job: dict[str, str], orig: Path) -> ImageConversionJobResult:
         """Handle image conversion job."""
-        # load original image
         start = time.time()
         logger.debug(f"Opening original image {orig}...")
         image = Image.open(orig)
@@ -193,29 +234,33 @@ class BmaClient:
 
         logger.debug("Rotating image (if needed)...")
         start = time.time()
-        image = ImageOps.exif_transpose(image)  # creates a copy with rotation normalised
+        ImageOps.exif_transpose(image, in_place=True)  # creates a copy with rotation normalised
+        if image is None:
+            raise ValueError("NoImage")
         orig_ar = Fraction(*image.size)
-        logger.debug(f"Rotating image took {time.time() - start} seconds, image is now {image.size} original AR is {orig_ar}")
+        logger.debug(
+            f"Rotating image took {time.time() - start} seconds, image is now {image.size} original AR is {orig_ar}"
+        )
 
         logger.debug("Getting exif metadata from image...")
         start = time.time()
         exif = image.getexif()
         logger.debug(f"Getting exif data took {time.time() - start} seconds")
 
-        size = job["width"], job["height"]
+        size = int(job["width"]), int(job["height"])
         ratio = Fraction(*size)
 
-        if job['custom_aspect_ratio']:
-            orig = "custom"
+        if job["custom_aspect_ratio"]:
+            orig_str = "custom"
         else:
-            orig = "original"
+            orig_str = "original"
             if orig_ar != ratio:
-                orig += "(ish)"
-        logger.debug(f"Desired image size is {size}, aspect ratio: {ratio} ({orig}), converting image...")
+                orig_str += "(ish)"
+        logger.debug(f"Desired image size is {size}, aspect ratio: {ratio} ({orig_str}), converting image...")
         start = time.time()
         # custom AR or not?
-        if job['custom_aspect_ratio']:
-            image = ImageOps.fit(image, size)
+        if job["custom_aspect_ratio"]:
+            image = ImageOps.fit(image, size)  # type: ignore[assignment]
         else:
             image.thumbnail(size)
         logger.debug(f"Converting image size and AR took {time.time() - start} seconds")
@@ -243,7 +288,7 @@ class BmaClient:
         logger.debug(f"Done, it took {t} seconds to upload {size} bytes, speed {round(size/t)} bytes/sec")
         return r.json()
 
-    def get_exif(self, fname: Path) -> dict[str, dict[str, str]]:
+    def get_exif(self, fname: Path) -> ExifExtractionJobResult:
         """Return a dict with exif data as read by exifread from the file.
 
         exifread returns a flat dict of key: value pairs where the key
@@ -253,7 +298,7 @@ class BmaClient:
         """
         with fname.open("rb") as f:
             tags = exifread.process_file(f, details=True)
-        grouped = {}
+        grouped: dict[str, dict[str, str]] = {}
         for tag, value in tags.items():
             if tag in SKIP_EXIF_TAGS:
                 logger.debug(f"Skipping exif tag {tag}")
