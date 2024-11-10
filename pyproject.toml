@@ -17,7 +17,7 @@ dependencies = [
     "httpx==0.27.2",
     "pillow==11.0.0",
 ]
-name = "bma-client"
+name = "bornhack-media-archive-client"
 description = "BornHack Media Archive Python Client Library"
 readme = "README.md"
 requires-python = ">=3.11"
