@@ -17,7 +17,14 @@ import httpx
 import magic
 from PIL import Image, ImageOps
 
-from .datastructures import ImageConversionJob, ImageExifExtractionJob, Job, ThumbnailJob, ThumbnailSourceJob
+from .datastructures import (
+    ImageConversionJob,
+    ImageExifExtractionJob,
+    Job,
+    JobNotSupportedError,
+    ThumbnailJob,
+    ThumbnailSourceJob,
+)
 
 logger = logging.getLogger("bma_client")
 
@@ -98,7 +105,7 @@ class BmaClient:
         self.settings = r.json()["bma_response"]
         return r.json()
 
-    def get_jobs(self, job_filter: str = "?limit=0") -> list[dict[str, str]]:
+    def get_jobs(self, job_filter: str = "?limit=0") -> list[Job]:
         """Get a filtered list of the jobs this user has access to."""
         r = self.client.get(self.base_url + f"/api/v1/json/jobs/{job_filter}").raise_for_status()
         response = r.json()["bma_response"]
@@ -125,14 +132,14 @@ class BmaClient:
             path=self.path / job.source_filename,
         )
 
-    def get_job_assignment(self, file_uuid: uuid.UUID | None = None) -> list[Job]:
+    def get_job_assignment(self, job_filter: str = "") -> list[Job]:
         """Ask for new job(s) from the API."""
         url = self.base_url + "/api/v1/json/jobs/assign/"
-        if file_uuid:
-            url += f"?file_uuid={file_uuid}"
+        if job_filter:
+            url += job_filter
         data = {
             "client_uuid": self.uuid,
-            "client_version": "bma-client-lib {__version__}",
+            "client_version": f"bma-client-lib {__version__}",
         }
         try:
             r = self.client.post(url, json=data).raise_for_status()
@@ -144,6 +151,14 @@ class BmaClient:
                 raise
         logger.debug(f"Returning {len(response)} assigned jobs")
         return response
+
+    def unassign_job(self, job: Job) -> bool:
+        """Unassign a job."""
+        logger.debug(f"Unassigning job {job.job_uuid}")
+        self.client.post(
+            self.base_url + f"/api/v1/json/jobs/{job.job_uuid}/unassign/",
+        ).raise_for_status()
+        return True
 
     def upload_file(self, path: Path, attribution: str, file_license: str) -> dict[str, dict[str, str]]:
         """Upload a file."""
@@ -169,7 +184,7 @@ class BmaClient:
                 if rotated is None:
                     raise ValueError("Rotation")
                 logger.debug(
-                    f"Image has exif rotation info, using post-rotate size {rotated.size}"
+                    f"Image has exif rotation info, using post-rotate size {rotated.size} "
                     f"instead of raw size {image.size}"
                 )
                 width, height = rotated.size
@@ -217,7 +232,7 @@ class BmaClient:
             filename = job.source_filename
 
         else:
-            raise TypeError(type(job))
+            raise JobNotSupportedError(job=job)
 
         self.write_and_upload_result(job=job, result=result, filename=filename)
 
@@ -252,7 +267,7 @@ class BmaClient:
 
             else:
                 logger.error("Unsupported job type")
-                raise TypeError(job.job_type)
+                raise JobNotSupportedError(job=job)
 
             self.upload_job_result(job=job, buf=buf, filename=filename, metadata=metadata)
 
@@ -391,4 +406,4 @@ class BmaClient:
                 orig=path,
             )
         # unsupported filetype
-        raise ValueError(info["filetype"])
+        raise JobNotSupportedError(job=job)

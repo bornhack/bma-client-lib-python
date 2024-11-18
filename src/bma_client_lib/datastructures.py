@@ -58,3 +58,11 @@ ImageConversionJobResult: TypeAlias = tuple[Image.Image, Image.Exif]
 ThumbnailSourceJobResult: TypeAlias = ImageConversionJobResult
 ExifExtractionJobResult: TypeAlias = dict[str, dict[str, str]]
 JobResult: TypeAlias = ImageConversionJobResult | ExifExtractionJobResult | ThumbnailSourceJobResult
+
+
+class JobNotSupportedError(Exception):
+    """Exception raised when a job is not supported by bma_client_lib for some reason."""
+
+    def __init__(self, job: Job) -> None:
+        """Exception raised when a job is not supported by bma_client_lib for some reason."""
+        super().__init__(f"{job.job_type} {job.job_uuid} for file {job.basefile_uuid} not supported by this client.")
