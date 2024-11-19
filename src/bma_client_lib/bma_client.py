@@ -210,24 +210,30 @@ class BmaClient:
                 self.base_url + "/api/v1/json/files/upload/",
                 data={"metadata": json.dumps(data)},
                 files=files,
+                timeout=30,
             )
             return r.json()
 
     def handle_job(self, job: Job) -> None:
         """Do the thing and upload the result."""
         # make sure the source file for the job is available
-        source = self.download_job_source(job)
         # do it
         result: JobResult
         if isinstance(job, ImageConversionJob | ThumbnailJob):
+            source = self.download_job_source(job)
             result = self.handle_image_conversion_job(job=job, orig=source)
             filename = f"{job.job_uuid}.{job.filetype.lower()}"
 
         elif isinstance(job, ImageExifExtractionJob):
+            source = self.download_job_source(job)
             result = self.get_exif(fname=source)
             filename = "exif.json"
 
         elif isinstance(job, ThumbnailSourceJob):
+            info = self.get_file_info(file_uuid=job.basefile_uuid)
+            if info["filetype"] != "image":
+                raise JobNotSupportedError(job=job)
+            source = self.download_job_source(job)
             result = self.create_thumbnail_source(job=job)
             filename = job.source_filename
 
