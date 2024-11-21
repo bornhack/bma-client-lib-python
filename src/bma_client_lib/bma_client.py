@@ -25,6 +25,7 @@ from .datastructures import (
     ThumbnailJob,
     ThumbnailSourceJob,
 )
+from .pillow_resize_and_crop import transform_image
 
 logger = logging.getLogger("bma_client")
 
@@ -248,7 +249,7 @@ class BmaClient:
             metadata: dict[str, int | str] = {}
             if isinstance(job, ImageConversionJob | ThumbnailJob):
                 image, exif = result
-                if not isinstance(image, Image.Image) or not isinstance(exif, Image.Exif):
+                if not isinstance(image[0], Image.Image) or not isinstance(exif, Image.Exif):
                     raise TypeError("Fuck")
                 # apply format specific encoding options
                 kwargs = {}
@@ -258,7 +259,11 @@ class BmaClient:
                     logger.debug(f"Format {job.mimetype} has custom encoding settings, kwargs is now: {kwargs}")
                 else:
                     logger.debug(f"No custom settings for format {job.mimetype}")
-                image.save(buf, format=job.filetype, exif=exif, **kwargs)
+                # sequence?
+                if len(image) > 1:
+                    kwargs["append_images"] = image[1:]
+                    kwargs["save_all"] = True
+                image[0].save(buf, format=job.filetype, exif=exif, **kwargs)
 
             elif isinstance(job, ImageExifExtractionJob):
                 logger.debug(f"Got exif data {result}")
@@ -266,10 +271,18 @@ class BmaClient:
 
             elif isinstance(job, ThumbnailSourceJob):
                 image, exif = result
-                if not isinstance(image, Image.Image) or not isinstance(exif, Image.Exif):
+                if not isinstance(image[0], Image.Image) or not isinstance(exif, Image.Exif):
                     raise TypeError("Fuck")
-                image.save(buf, format="WEBP", lossless=True, quality=1)
-                metadata = {"width": 500, "height": image.height, "mimetype": "image/webp"}
+                kwargs = {}
+                # thumbnailsources are always WEBP
+                if "image/webp" in self.settings["encoding"]["images"]:
+                    kwargs.update(self.settings["encoding"]["images"]["image/webp"])
+                # sequence?
+                if len(image) > 1:
+                    kwargs["append_images"] = image[1:]
+                    kwargs["save_all"] = True
+                image[0].save(buf, format="WEBP", **kwargs)
+                metadata = {"width": 500, "height": image[0].height, "mimetype": "image/webp"}
 
             else:
                 logger.error("Unsupported job type")
@@ -315,15 +328,11 @@ class BmaClient:
 
         logger.debug(f"Desired image size is {size}, aspect ratio: {ratio} ({orig_str}), converting image...")
         start = time.time()
-        # custom AR or not?
-        if job.custom_aspect_ratio:
-            image = ImageOps.fit(image=image, size=size, method=Image.Resampling.LANCZOS, centering=crop_center)  # type: ignore[assignment]
-        else:
-            image.thumbnail(size=size, resample=Image.Resampling.LANCZOS)
+        images = transform_image(original_img=image, crop_w=size[0], crop_h=size[1])
         logger.debug(f"Converting image size and AR took {time.time() - start} seconds")
 
         logger.debug("Done, returning result...")
-        return image, exif
+        return images, exif
 
     def upload_job_result(
         self,

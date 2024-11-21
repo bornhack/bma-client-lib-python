@@ -4,7 +4,7 @@ import uuid
 from dataclasses import dataclass
 from typing import TypeAlias
 
-from PIL import Image
+from PIL import Image, ImageFile
 
 
 @dataclass
@@ -20,6 +20,7 @@ class BaseJob:
     finished: bool
     source_url: str
     source_filename: str
+    source_mimetype: str
     schema_name: str
 
 
@@ -54,7 +55,7 @@ job_types = {
     "ThumbnailJob": ThumbnailJob,
 }
 
-ImageConversionJobResult: TypeAlias = tuple[Image.Image, Image.Exif]
+ImageConversionJobResult: TypeAlias = tuple[list[Image.Image | ImageFile.ImageFile], Image.Exif]
 ThumbnailSourceJobResult: TypeAlias = ImageConversionJobResult
 ExifExtractionJobResult: TypeAlias = dict[str, dict[str, str]]
 JobResult: TypeAlias = ImageConversionJobResult | ExifExtractionJobResult | ThumbnailSourceJobResult
