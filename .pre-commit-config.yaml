@@ -16,4 +16,5 @@ repos:
           - "exifread"
           - "httpx"
           - "pillow"
+        exclude: "tests/.*"
 ...

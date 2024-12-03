@@ -1,25 +1,32 @@
 """Pillow cropping with sequence (gif, webp) support.
 
-Borrowed from https://gist.github.com/muratgozel/ce1aa99f97fc1a99b3f3ec90cf77e5f5
+Originally based on https://gist.github.com/muratgozel/ce1aa99f97fc1a99b3f3ec90cf77e5f5
 """
 
-from math import fabs, floor
+import logging
+from fractions import Fraction
+from math import floor
 
 from PIL import Image, ImageFile, ImageSequence
 
+logger = logging.getLogger("bma_client")
 
-def transform_image(original_img: Image.Image, crop_w: int, crop_h: int, center_point: tuple[int, int] = (0.5,0.5)) -> list[Image.Image | ImageFile.ImageFile]:
-    """Resizes and crops the image to the specified crop_w and crop_h if necessary.
+
+def transform_image(
+    original_img: Image.Image, crop_w: int, crop_h: int, center_point: tuple[float, float] = (0.5, 0.5)
+) -> list[Image.Image | ImageFile.ImageFile]:
+    """Shrinks and crops the image to the specified crop_w and crop_h if necessary.
 
     Works with multi frame gif and webp images.
 
     Args:
       original_img(Image.Image): is the image instance created by pillow ( Image.open(filepath) )
-      crop_w(int): is the width in pixels for the image that will be resized and cropped
-      crop_h(int): is the height in pixels for the image that will be resized and cropped
+      crop_w(int): is the desired width in pixels
+      crop_h(int): is the desired height in pixels
+      center_point(tuple[float,float]): The center point of cropping as a percentage.
 
     returns:
-      Instance of an Image or list of frames which they are instances of an Image individually
+      List of one or more Image instances
     """
     img_w, img_h = (original_img.size[0], original_img.size[1])
     # sequence?
@@ -27,38 +34,73 @@ def transform_image(original_img: Image.Image, crop_w: int, crop_h: int, center_
 
     def transform_frame(frame: Image.Image) -> Image.Image | ImageFile.ImageFile:
         """Resizes and crops the individual frame in the image."""
-        # resize the image to the specified height if crop_w is null in the recipe
-        if crop_w is None:
-            if crop_h == img_h:
-                return frame
-            new_w = floor(img_w * crop_h / img_h)
-            new_h = crop_h
-            return frame.resize((new_w, new_h), resample=Image.Resampling.LANCZOS)
-
         # return the original image if crop size is equal to img size
         if crop_w == img_w and crop_h == img_h:
+            logger.debug(
+                f"Image size and requested size are the same ({crop_w}*{crop_h}), returning image without resizing"
+            )
             return frame
 
-        # first resize to get most visible area of the image and then crop
-        w_diff = fabs(crop_w - img_w)
-        h_diff = fabs(crop_h - img_h)
-        enlarge_image = bool(crop_w > img_w or crop_h > img_h)
-        shrink_image = bool(crop_w < img_w or crop_h < img_h)
+        # resizing is required before cropping only if both image dimensions are bigger than the crop size
+        if crop_w < img_w and crop_h < img_h:
+            # if calculated height is bigger than requested crop height
+            if floor(crop_w * img_h / img_w) > crop_h:
+                # then resize image to requested crop width keeping proportional height
+                new_w = crop_w
+                new_h = floor(crop_w * img_h / img_w)
+            else:
+                # else resize the image to requested crop height keeping proportional width
+                new_w = floor(crop_h * img_w / img_h)
+                new_h = crop_h
+        else:
+            # keep size since one or both dimensions is <= crop size
+            new_w = img_w
+            new_h = img_h
 
-        if enlarge_image is True:
-            new_w = floor(crop_h * img_w / img_h) if h_diff > w_diff else crop_w
-            new_h = floor(crop_w * img_h / img_w) if h_diff < w_diff else crop_h
-
-        if shrink_image is True:
-            new_w = crop_w if h_diff > w_diff else floor(crop_h * img_w / img_h)
-            new_h = crop_h if h_diff < w_diff else floor(crop_w * img_h / img_w)
-
-        left = (new_w - crop_w) * center_point[0]
+        # get crop coordinates
+        left = floor((new_w - crop_w) * center_point[0])
+        top = floor((new_h - crop_h) * center_point[1])
         right = left + crop_w
-        top = (new_h - crop_h) * center_point[1]
         bottom = top + crop_h
 
-        return frame.resize((new_w, new_h), resample=Image.Resampling.LANCZOS).crop((left, top, right, bottom))
+        orig_ratio = Fraction(img_w, img_h)
+        new_ratio = Fraction(new_w, new_h)
+        logger.debug(
+            f"Original size is {img_w}*{img_h} ({orig_ratio}), requested size is {crop_w}*{crop_h}, resizing "
+            f"to {new_w}*{new_h} ({new_ratio}), then cropping - initial crop coord are {left, top, right, bottom}"
+        )
+
+        # make sure any space outside the image is transparent
+        t_left = max(left, 0)
+        t_top = max(top, 0)
+        t_right = min(right, new_w)
+        t_bottom = min(bottom, new_h)
+        logger.debug(f"after transparency adjustments crop coords are {t_left, t_top, t_right, t_bottom}")
+
+        # resize and crop the image
+        frame = frame.resize((new_w, new_h), resample=Image.Resampling.LANCZOS).crop((t_left, t_top, t_right, t_bottom))
+        logger.debug(f"Result frame size is {frame.width}*{frame.height}")
+
+        logger.debug(f"new {crop_w}*{crop_h} orig {img_w}*{img_h}")
+        if crop_w > img_w or crop_h > img_h:
+            # original image has one or both dimensions smaller than the requested size,
+            # paste the image onto a transparent canvas exactly as big as requested
+            canvas = Image.new("RGBA", (crop_w, crop_h), (0, 0, 0, 0))
+            logger.debug(f"Transparent canvas size is {canvas.width}*{canvas.height}")
+            c_left = t_left - left
+            c_top = t_top - top
+            logger.debug(f"Positioning image on canvas at {c_left} {c_top}")
+            canvas.paste(frame, (c_left, c_top))
+            return canvas
+        # original image larger than the requested size in both dimensions,
+        # no transparent canvas needed, just return the resized frame as-is
+        # frame might be 1px smaller than requested in one or both dimensions
+        # due to rounding
+        logger.debug(
+            f"Image has been downsized from {img_w}*{img_h} to {frame.width}*{frame.height} - "
+            f"requested size was {crop_w}*{crop_h}."
+        )
+        return frame
 
     # single frame image
     if n_frames == 1:

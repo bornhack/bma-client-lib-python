@@ -28,6 +28,10 @@ dev = [
     "pre-commit==4.0.0",
     "setuptools-scm==8.0.4",
 ]
+test = [
+    "pytest==8.3.3",
+    "pytest-mock==3.14.0",
+]
 
 [project.urls]
 homepage = "https://github.com/bornhack/bma-client-lib-python"
@@ -63,3 +67,14 @@ line-length = 120
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"*/tests/*" = [
+    "S101", # https://docs.astral.sh/ruff/rules/assert/
+    "ANN002", # https://docs.astral.sh/ruff/rules/missing-type-args/
+    "ANN003", # https://docs.astral.sh/ruff/rules/missing-type-kwargs/
+]
+
+[tool.mypy]
+mypy_path = "src"
+strict = true

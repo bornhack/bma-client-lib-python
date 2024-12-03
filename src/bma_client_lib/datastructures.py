@@ -19,8 +19,6 @@ class BaseJob:
     client_version: str
     finished: bool
     source_url: str
-    source_filename: str
-    source_mimetype: str
     schema_name: str
 
 

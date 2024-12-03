@@ -2,7 +2,6 @@
 
 import json
 import logging
-import math
 import time
 import uuid
 from fractions import Fraction
@@ -39,7 +38,7 @@ SKIP_EXIF_TAGS = ["JPEGThumbnail", "TIFFThumbnail", "Filename"]
 
 # get version
 try:
-    __version__ = version("bma-client-lib")
+    __version__ = version("bma_client_lib")
 except PackageNotFoundError:
     __version__ = "0.0.0"
 
@@ -79,6 +78,11 @@ class BmaClient:
         self.skip_exif_tags = SKIP_EXIF_TAGS
         self.get_server_settings()
         self.__version__ = __version__
+        # build client object
+        self.clientjson = {
+            "client_uuid": self.uuid,
+            "client_version": f"bma-client-lib {__version__}",
+        }
 
     def update_access_token(self) -> None:
         """Set or update self.access_token using self.refresh_token."""
@@ -104,33 +108,40 @@ class BmaClient:
             self.base_url + "/api/v1/json/jobs/settings/",
         ).raise_for_status()
         self.settings = r.json()["bma_response"]
-        return r.json()
+        return self.settings  # type: ignore[no-any-return]
 
     def get_jobs(self, job_filter: str = "?limit=0") -> list[Job]:
         """Get a filtered list of the jobs this user has access to."""
         r = self.client.get(self.base_url + f"/api/v1/json/jobs/{job_filter}").raise_for_status()
         response = r.json()["bma_response"]
         logger.debug(f"Returning {len(response)} jobs with filter {job_filter}")
-        return response
+        return response  # type: ignore[no-any-return]
 
     def get_file_info(self, file_uuid: uuid.UUID) -> dict[str, str]:
         """Get metadata for a file."""
         r = self.client.get(self.base_url + f"/api/v1/json/files/{file_uuid}/").raise_for_status()
-        return r.json()["bma_response"]
+        return r.json()["bma_response"]  # type: ignore[no-any-return]
 
     def download(self, url: str, path: Path) -> Path:
         """Download a file to a path."""
         r = self.client.get(url).raise_for_status()
         logger.debug(f"Done downloading {len(r.content)} bytes from {url}, saving to {path}")
+        path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("wb") as f:
             f.write(r.content)
         return path
 
     def download_job_source(self, job: Job) -> Path:
         """Download the file needed to do a job."""
+        # skip the leading slash when using url as a local path
+        path = self.path / job.source_url[1:]
+        if path.exists():
+            # file was downloaded previously
+            return path
+        # get the file
         return self.download(
             url=self.base_url + job.source_url,
-            path=self.path / job.source_filename,
+            path=path,
         )
 
     def get_job_assignment(self, job_filter: str = "") -> list[Job]:
@@ -138,12 +149,8 @@ class BmaClient:
         url = self.base_url + "/api/v1/json/jobs/assign/"
         if job_filter:
             url += job_filter
-        data = {
-            "client_uuid": self.uuid,
-            "client_version": f"bma-client-lib {__version__}",
-        }
         try:
-            r = self.client.post(url, json=data).raise_for_status()
+            r = self.client.post(url, json=self.clientjson).raise_for_status()
             response = r.json()["bma_response"]
         except httpx.HTTPStatusError as e:
             if e.response.status_code == HTTPStatus.NOT_FOUND:
@@ -151,7 +158,7 @@ class BmaClient:
             else:
                 raise
         logger.debug(f"Returning {len(response)} assigned jobs")
-        return response
+        return response  # type: ignore[no-any-return]
 
     def unassign_job(self, job: Job) -> bool:
         """Unassign a job."""
@@ -163,7 +170,7 @@ class BmaClient:
 
     def upload_file(self, path: Path, attribution: str, file_license: str) -> dict[str, dict[str, str]]:
         """Upload a file."""
-        # get mimetype
+        # get mimetype using magic on the first 2kb of the file
         with path.open("rb") as fh:
             mimetype = magic.from_buffer(fh.read(2048), mime=True)
 
@@ -209,11 +216,11 @@ class BmaClient:
             # doit
             r = self.client.post(
                 self.base_url + "/api/v1/json/files/upload/",
-                data={"metadata": json.dumps(data)},
+                data={"f_metadata": json.dumps(data), "client": json.dumps(self.clientjson)},
                 files=files,
                 timeout=30,
             )
-            return r.json()
+            return r.json()  # type: ignore[no-any-return]
 
     def handle_job(self, job: Job) -> None:
         """Do the thing and upload the result."""
@@ -236,7 +243,7 @@ class BmaClient:
                 raise JobNotSupportedError(job=job)
             source = self.download_job_source(job)
             result = self.create_thumbnail_source(job=job)
-            filename = job.source_filename
+            filename = job.source_url
 
         else:
             raise JobNotSupportedError(job=job)
@@ -264,6 +271,7 @@ class BmaClient:
                     kwargs["append_images"] = image[1:]
                     kwargs["save_all"] = True
                 image[0].save(buf, format=job.filetype, exif=exif, **kwargs)
+                metadata = {"width": image[0].width, "height": image[0].height, "mimetype": job.mimetype}
 
             elif isinstance(job, ImageExifExtractionJob):
                 logger.debug(f"Got exif data {result}")
@@ -329,6 +337,7 @@ class BmaClient:
         logger.debug(f"Desired image size is {size}, aspect ratio: {ratio} ({orig_str}), converting image...")
         start = time.time()
         images = transform_image(original_img=image, crop_w=size[0], crop_h=size[1])
+        logger.debug(f"Result image size is {images[0].width}*{images[0].height}")
         logger.debug(f"Converting image size and AR took {time.time() - start} seconds")
 
         logger.debug("Done, returning result...")
@@ -340,20 +349,15 @@ class BmaClient:
         buf: "BytesIO",
         filename: str,
         metadata: dict[str, str | int] | None = None,
-    ) -> dict:
+    ) -> dict[str, str]:
         """Upload the result of a job."""
         size = buf.getbuffer().nbytes
         logger.debug(f"Uploading {size} bytes result for job {job.job_uuid} with filename {filename}")
         start = time.time()
         files = {"f": (filename, buf)}
-        # build client object
-        client = {
-            "client_uuid": self.uuid,
-            "client_version": "bma-client-lib {__version__}",
-        }
-        data = {"client": json.dumps(client)}
-        if isinstance(job, ThumbnailSourceJob):
-            # ThumbnailSourceJob needs a metadata object as well
+        data = {"client": json.dumps(self.clientjson)}
+        if isinstance(job, ThumbnailJob | ThumbnailSourceJob | ImageConversionJob):
+            # Image generating jobs needs a metadata object as well
             data["metadata"] = json.dumps(metadata)
         # doit
         r = self.client.post(
@@ -363,7 +367,7 @@ class BmaClient:
         ).raise_for_status()
         t = time.time() - start
         logger.debug(f"Done, it took {t} seconds to upload {size} bytes, speed {round(size/t)} bytes/sec")
-        return r.json()
+        return r.json()  # type: ignore[no-any-return]
 
     def get_exif(self, fname: Path) -> "ExifExtractionJobResult":
         """Return a dict with exif data as read by exifread from the file.
@@ -398,27 +402,9 @@ class BmaClient:
             "description": description,
         }
         r = self.client.post(url, json=data).raise_for_status()
-        return r.json()["bma_response"]
+        return r.json()["bma_response"]  # type: ignore[no-any-return]
 
     def create_thumbnail_source(self, job: ThumbnailSourceJob) -> "ThumbnailSourceJobResult":
         """Create a thumbnail source for this file."""
-        info = self.get_file_info(file_uuid=job.basefile_uuid)
-        if info["filetype"] == "image":
-            # use a max 500px wide version of the image as thumbnail source
-            path = self.path / info["filename"]
-            original_ratio = Fraction(int(info["width"]), int(info["height"]))
-            height = math.floor(500 / original_ratio)
-            # just call the regular image conversion method to make a thumbnail
-            return self.handle_image_conversion_job(
-                job=ImageConversionJob(
-                    **job.__dict__,
-                    width=500,
-                    height=height,
-                    custom_aspect_ratio=False,
-                    filetype="WEBP",
-                    mimetype="image/webp",
-                ),
-                orig=path,
-            )
         # unsupported filetype
         raise JobNotSupportedError(job=job)
