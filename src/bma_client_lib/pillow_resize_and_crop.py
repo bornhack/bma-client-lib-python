@@ -7,9 +7,15 @@ import logging
 from fractions import Fraction
 from math import floor
 
-from PIL import Image, ImageFile, ImageSequence
+from PIL import Image, ImageFile, ImageSequence, JpegImagePlugin
 
 logger = logging.getLogger("bma_client")
+
+# some cameras save JPEGs as MPO with embedded thumbnails,
+# can also be used for 3d images, handle MPO files as plain JPEGs for now
+# https://github.com/python-pillow/Pillow/issues/1138
+# https://github.com/python-pillow/Pillow/issues/4603
+JpegImagePlugin._getmp = lambda _x: None  # type: ignore[assignment] # noqa: SLF001
 
 
 def transform_image(
