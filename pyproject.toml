@@ -17,6 +17,7 @@ dependencies = [
     "opencv-python==4.10.0.84",
     "pillow==11.0.0",
     "python-magic==0.4.27",
+    "PyMuPDF==1.25.1",
 ]
 name = "bma-client-lib"
 description = "BornHack Media Archive Client Library"
@@ -79,3 +80,12 @@ convention = "google"
 [tool.mypy]
 mypy_path = "src"
 strict = true
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    "error",
+    # https://github.com/swig/swig/issues/2881
+    'ignore:builtin type SwigPyPacked has no __module__ attribute:DeprecationWarning',
+    'ignore:builtin type SwigPyObject has no __module__ attribute:DeprecationWarning',
+    'ignore:builtin type swigvarlink has no __module__ attribute:DeprecationWarning',
+]

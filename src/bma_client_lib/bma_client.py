@@ -15,6 +15,7 @@ import cv2
 import exifread
 import httpx
 import magic
+import pymupdf
 from PIL import Image, ImageOps
 
 from .datastructures import (
@@ -159,13 +160,11 @@ class BmaClient:
         logger.debug(f"Converting image size and AR took {time.time() - start} seconds")
         logger.debug("Done.")
 
-    def _handle_thumbnail_source_job(
-        self, job: ThumbnailSourceJob, fileinfo: dict[str, str], screenshot_time_seconds: int = 60
-    ) -> None:
+    def _handle_thumbnail_source_job(self, job: ThumbnailSourceJob, fileinfo: dict[str, str]) -> None:
         """Create a thumbnail source for this file."""
         if fileinfo["filetype"] == "video":
             # use opencv to get video screenshot
-            cv2_ss = self._get_video_screenshot(job=job, seconds=screenshot_time_seconds)
+            cv2_ss = self._get_video_screenshot(job=job)
             cc = cv2.cvtColor(cv2_ss, cv2.COLOR_BGR2RGB)
             job.images = [Image.fromarray(cc)]
             # create an exif object with basic info
@@ -176,10 +175,22 @@ class BmaClient:
             exif[0x131] = self.clientinfo["client_version"]
             job.exif = exif
             return
+        if fileinfo["filetype"] == "document":
+            # use pymypdf to take a screenshot of page 1 of pdf/txt
+            ss = self._get_document_screenshot(job=job)
+            job.images = [ss]
+            exif = Image.Exif()
+            exif[0x100] = job.images[0].width
+            exif[0x101] = job.images[0].height
+            exif[0x10E] = f"ThumbnailSource for BMA document file {job.basefile_uuid}"
+            exif[0x131] = self.clientinfo["client_version"]
+            job.exif = exif
+            return
+
         # unsupported filetype
         raise JobNotSupportedError(job=job)
 
-    def _get_video_screenshot(self, job: ThumbnailSourceJob, seconds: int) -> Image.Image:
+    def _get_video_screenshot(self, job: ThumbnailSourceJob, seconds: int = 60) -> Image.Image:
         """Get a screenshot a certain number of seconds into the video."""
         path = self.path / job.source_url[1:]
         cam = cv2.VideoCapture(path)
@@ -197,6 +208,14 @@ class BmaClient:
         cam.release()
         cv2.destroyAllWindows()
         return frame  # type: ignore[no-any-return]
+
+    def _get_document_screenshot(self, job: ThumbnailSourceJob, page: int = 0) -> Image.Image:
+        """Get a screenshot a certain number of pages into the pdf/txt file."""
+        path = self.path / job.source_url[1:]
+        doc = pymupdf.open(path)
+        pdfpage = doc[page]
+        pix = pdfpage.get_pixmap()
+        return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
 
     ###############################################################################
 
