@@ -5,7 +5,7 @@ Originally based on https://gist.github.com/muratgozel/ce1aa99f97fc1a99b3f3ec90c
 
 import logging
 from fractions import Fraction
-from math import floor
+from math import ceil, floor
 
 from PIL import Image, ImageFile, ImageSequence, JpegImagePlugin
 
@@ -50,13 +50,13 @@ def transform_image(
         # resizing is required before cropping only if both image dimensions are bigger than the crop size
         if crop_w < img_w and crop_h < img_h:
             # if calculated height is bigger than requested crop height
-            if floor(crop_w * img_h / img_w) > crop_h:
+            if ceil(crop_w * img_h / img_w) > crop_h:
                 # then resize image to requested crop width keeping proportional height
                 new_w = crop_w
-                new_h = floor(crop_w * img_h / img_w)
+                new_h = ceil(crop_w * img_h / img_w)
             else:
                 # else resize the image to requested crop height keeping proportional width
-                new_w = floor(crop_h * img_w / img_h)
+                new_w = ceil(crop_h * img_w / img_h)
                 new_h = crop_h
         else:
             # keep size since one or both dimensions is <= crop size
@@ -88,7 +88,7 @@ def transform_image(
         logger.debug(f"Result frame size is {frame.width}*{frame.height}")
 
         logger.debug(f"new {crop_w}*{crop_h} orig {img_w}*{img_h}")
-        if crop_w > img_w or crop_h > img_h:
+        if crop_w > img_w or crop_h > img_h or frame.width < crop_w:
             # original image has one or both dimensions smaller than the requested size,
             # paste the image onto a transparent canvas exactly as big as requested
             canvas = Image.new("RGBA", (crop_w, crop_h), (0, 0, 0, 0))

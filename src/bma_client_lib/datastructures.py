@@ -7,9 +7,9 @@ from typing import TypeAlias
 from PIL import Image, ImageFile
 
 
-@dataclass
+@dataclass(kw_only=True)
 class BaseJob:
-    """Base class inherited by ImageConversionJob and ImageExifExtractionJob."""
+    """Base class inherited by all other job classes."""
 
     job_type: str
     job_uuid: uuid.UUID
@@ -22,9 +22,29 @@ class BaseJob:
     schema_name: str
 
 
-@dataclass
-class ImageConversionJob(BaseJob):
-    """Represent an ImageConversionJob."""
+@dataclass(kw_only=True)
+class ImageExifExtractionJob(BaseJob):
+    """Represent an ImageExifExtractionJob and result."""
+
+    exifdict: dict[str, dict[str, str]] | None = None
+
+
+@dataclass(kw_only=True)
+class BaseImageResultJob(BaseJob):
+    """Base class for jobs with a result containing exif and a list of images."""
+
+    exif: Image.Exif | None = None
+    images: list[Image.Image | ImageFile.ImageFile] | None = None
+
+
+@dataclass(kw_only=True)
+class ThumbnailSourceJob(BaseImageResultJob):
+    """Represent a ThumbnailSourceJob and result."""
+
+
+@dataclass(kw_only=True)
+class ImageConversionJob(BaseImageResultJob):
+    """Represent an ImageConversionJob and result."""
 
     filetype: str
     width: int
@@ -33,16 +53,9 @@ class ImageConversionJob(BaseJob):
     custom_aspect_ratio: bool
 
 
-class ImageExifExtractionJob(BaseJob):
-    """Represent an ImageExifExtractionJob."""
-
-
-class ThumbnailSourceJob(BaseJob):
-    """Represent a ThumbnailSourceJob."""
-
-
+@dataclass(kw_only=True)
 class ThumbnailJob(ImageConversionJob):
-    """Represent a ThumbnailJob."""
+    """Represent a ThumbnailJob and result."""
 
 
 Job: TypeAlias = ImageConversionJob | ImageExifExtractionJob | ThumbnailSourceJob | ThumbnailJob
@@ -52,11 +65,6 @@ job_types = {
     "ThumbnailSourceJob": ThumbnailSourceJob,
     "ThumbnailJob": ThumbnailJob,
 }
-
-ImageConversionJobResult: TypeAlias = tuple[list[Image.Image | ImageFile.ImageFile], Image.Exif]
-ThumbnailSourceJobResult: TypeAlias = ImageConversionJobResult
-ExifExtractionJobResult: TypeAlias = dict[str, dict[str, str]]
-JobResult: TypeAlias = ImageConversionJobResult | ExifExtractionJobResult | ThumbnailSourceJobResult
 
 
 class JobNotSupportedError(Exception):

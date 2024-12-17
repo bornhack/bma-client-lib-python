@@ -11,6 +11,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import cv2
 import exifread
 import httpx
 import magic
@@ -30,8 +31,6 @@ logger = logging.getLogger("bma_client")
 
 if TYPE_CHECKING:
     from django.http import HttpRequest
-
-    from .datastructures import ExifExtractionJobResult, ImageConversionJobResult, JobResult, ThumbnailSourceJobResult
 
 # maybe these should come from server settings
 SKIP_EXIF_TAGS = ["JPEGThumbnail", "TIFFThumbnail", "Filename"]
@@ -72,19 +71,19 @@ class BmaClient:
         self.refresh_token = refresh_token
         self.base_url = base_url
         logger.debug("Updating oauth token...")
-        self.update_access_token()
+        self._update_access_token()
         self.uuid = client_uuid if client_uuid else uuid.uuid4()
         self.path = path
         self.skip_exif_tags = SKIP_EXIF_TAGS
         self.get_server_settings()
         self.__version__ = __version__
         # build client object
-        self.clientjson = {
+        self.clientinfo = {
             "client_uuid": self.uuid,
             "client_version": f"bma-client-lib {__version__}",
         }
 
-    def update_access_token(self) -> None:
+    def _update_access_token(self) -> None:
         """Set or update self.access_token using self.refresh_token."""
         r = httpx.post(
             self.base_url + "/o/token/",
@@ -101,6 +100,175 @@ class BmaClient:
         logger.warning(f"got new access_token: {self.access_token}")
         self.auth = BmaBearerAuth(token=self.access_token)
         self.client = httpx.Client(auth=self.auth)
+
+    def _download_job_source(self, job: Job) -> Path:
+        """Download the file needed to do a job."""
+        # skip the leading slash when using url as a local path
+        path = self.path / job.source_url[1:]
+        if path.exists():
+            # file was downloaded previously
+            return path
+        # get the file
+        return self.download(
+            url=self.base_url + job.source_url,
+            path=path,
+        )
+
+    ###############################################################################
+
+    def _handle_image_conversion_job(
+        self, job: ImageConversionJob, orig: Path, crop_center: tuple[float, float] = (0.5, 0.5)
+    ) -> None:
+        """Handle image conversion job."""
+        start = time.time()
+        logger.debug(f"Opening original image {orig}...")
+        image = Image.open(orig)
+        logger.debug(
+            f"Opening {orig.stat().st_size} bytes {image.size} source image took {time.time() - start} seconds"
+        )
+
+        logger.debug("Rotating image (if needed)...")
+        start = time.time()
+        ImageOps.exif_transpose(image, in_place=True)  # creates a copy with rotation normalised
+        if image is None:
+            raise ValueError("NoImage")
+        orig_ar = Fraction(*image.size)
+        logger.debug(
+            f"Rotating image took {time.time() - start} seconds, image is now {image.size} original AR is {orig_ar}"
+        )
+
+        logger.debug("Getting exif metadata from image...")
+        start = time.time()
+        job.exif = image.getexif()
+        logger.debug(f"Getting exif data took {time.time() - start} seconds")
+
+        size = int(job.width), int(job.height)
+        ratio = Fraction(*size)
+
+        if job.custom_aspect_ratio:
+            orig_str = "custom"
+        else:
+            orig_str = "original"
+            if orig_ar != ratio:
+                orig_str += "(ish)"
+
+        logger.debug(f"Desired image size is {size}, aspect ratio: {ratio} ({orig_str}), converting image...")
+        start = time.time()
+        job.images = transform_image(original_img=image, crop_w=size[0], crop_h=size[1])
+        logger.debug(f"Result image size is {job.images[0].width}*{job.images[0].height}")
+        logger.debug(f"Converting image size and AR took {time.time() - start} seconds")
+        logger.debug("Done.")
+
+    def _handle_thumbnail_source_job(
+        self, job: ThumbnailSourceJob, fileinfo: dict[str, str], screenshot_time_seconds: int = 60
+    ) -> None:
+        """Create a thumbnail source for this file."""
+        if fileinfo["filetype"] == "video":
+            # use opencv to get video screenshot
+            cv2_ss = self._get_video_screenshot(job=job, seconds=screenshot_time_seconds)
+            cc = cv2.cvtColor(cv2_ss, cv2.COLOR_BGR2RGB)
+            job.images = [Image.fromarray(cc)]
+            # create an exif object with basic info
+            exif = Image.Exif()
+            exif[0x100] = job.images[0].width
+            exif[0x101] = job.images[0].height
+            exif[0x10E] = f"ThumbnailSource for BMA video file {job.basefile_uuid}"
+            exif[0x131] = self.clientinfo["client_version"]
+            job.exif = exif
+            return
+        # unsupported filetype
+        raise JobNotSupportedError(job=job)
+
+    def _get_video_screenshot(self, job: ThumbnailSourceJob, seconds: int) -> Image.Image:
+        """Get a screenshot a certain number of seconds into the video."""
+        path = self.path / job.source_url[1:]
+        cam = cv2.VideoCapture(path)
+        fps = int(cam.get(cv2.CAP_PROP_FPS))
+        currentframe = 0
+        while True:
+            ret, frame = cam.read()
+            if ret:
+                if currentframe > 0 and currentframe % (fps * seconds) == 0:
+                    # take screenshot
+                    break
+                currentframe += 1
+            else:
+                raise JobNotSupportedError(job=job)
+        cam.release()
+        cv2.destroyAllWindows()
+        return frame  # type: ignore[no-any-return]
+
+    ###############################################################################
+
+    def _write_and_upload_result(self, job: Job, filename: str) -> None:
+        """Encode and write the job result to a buffer, then upload."""
+        with BytesIO() as buf:
+            metadata: dict[str, int | str] = {}
+            if isinstance(job, ImageConversionJob | ThumbnailJob) and job.images is not None:
+                # apply format specific encoding options
+                kwargs = {}
+                if job.mimetype in self.settings["encoding"]["images"]:
+                    # this format has custom encoding options, like quality/lossless, apply them
+                    kwargs.update(self.settings["encoding"]["images"][job.mimetype])
+                    logger.debug(f"Format {job.mimetype} has custom encoding settings, kwargs is now: {kwargs}")
+                else:
+                    logger.debug(f"No custom settings for format {job.mimetype}")
+                # sequence?
+                if len(job.images) > 1:
+                    kwargs["append_images"] = job.images[1:]
+                    kwargs["save_all"] = True
+                job.images[0].save(buf, format=job.filetype, exif=job.exif, **kwargs)
+                metadata = {"width": job.images[0].width, "height": job.images[0].height, "mimetype": job.mimetype}
+
+            elif isinstance(job, ImageExifExtractionJob):
+                logger.debug(f"Got exif data {job.exifdict}")
+                buf.write(json.dumps(job.exifdict).encode())
+
+            elif isinstance(job, ThumbnailSourceJob) and job.images is not None:
+                kwargs = {}
+                # thumbnailsources are always WEBP
+                if "image/webp" in self.settings["encoding"]["images"]:
+                    kwargs.update(self.settings["encoding"]["images"]["image/webp"])
+                job.images[0].save(buf, format="WEBP", exif=job.exif, **kwargs)
+                metadata = {
+                    "width": job.images[0].width,
+                    "height": job.images[0].height,
+                    "mimetype": "image/webp",
+                }
+
+            else:
+                logger.error("Error processing file")
+                raise JobNotSupportedError(job=job)
+
+            self._upload_job_result(job=job, buf=buf, filename=filename, metadata=metadata)
+
+    def _upload_job_result(
+        self,
+        job: Job,
+        buf: "BytesIO",
+        filename: str,
+        metadata: dict[str, str | int] | None = None,
+    ) -> dict[str, str]:
+        """Upload the result of a job."""
+        size = buf.getbuffer().nbytes
+        logger.debug(f"Uploading {size} bytes result for job {job.job_uuid} with filename {filename}")
+        start = time.time()
+        files = {"f": (filename, buf)}
+        data = {"client": json.dumps(self.clientinfo)}
+        if isinstance(job, ThumbnailJob | ThumbnailSourceJob | ImageConversionJob):
+            # Image generating jobs needs a metadata object as well
+            data["metadata"] = json.dumps(metadata)
+        # doit
+        r = self.client.post(
+            self.base_url + f"/api/v1/json/jobs/{job.job_uuid}/result/",
+            data=data,
+            files=files,
+        ).raise_for_status()
+        t = time.time() - start
+        logger.debug(f"Done, it took {t} seconds to upload {size} bytes, speed {round(size/t)} bytes/sec")
+        return r.json()  # type: ignore[no-any-return]
+
+    ###############################################################################
 
     def get_server_settings(self) -> dict[str, dict[str, dict[str, list[str]]]]:
         """Get BMA settings from server, return as dict."""
@@ -131,26 +299,13 @@ class BmaClient:
             f.write(r.content)
         return path
 
-    def download_job_source(self, job: Job) -> Path:
-        """Download the file needed to do a job."""
-        # skip the leading slash when using url as a local path
-        path = self.path / job.source_url[1:]
-        if path.exists():
-            # file was downloaded previously
-            return path
-        # get the file
-        return self.download(
-            url=self.base_url + job.source_url,
-            path=path,
-        )
-
     def get_job_assignment(self, job_filter: str = "") -> list[Job]:
         """Ask for new job(s) from the API."""
         url = self.base_url + "/api/v1/json/jobs/assign/"
         if job_filter:
             url += job_filter
         try:
-            r = self.client.post(url, json=self.clientjson).raise_for_status()
+            r = self.client.post(url, json=self.clientinfo).raise_for_status()
             response = r.json()["bma_response"]
         except httpx.HTTPStatusError as e:
             if e.response.status_code == HTTPStatus.NOT_FOUND:
@@ -216,160 +371,39 @@ class BmaClient:
             # doit
             r = self.client.post(
                 self.base_url + "/api/v1/json/files/upload/",
-                data={"f_metadata": json.dumps(data), "client": json.dumps(self.clientjson)},
+                data={"f_metadata": json.dumps(data), "client": json.dumps(self.clientinfo)},
                 files=files,
                 timeout=30,
             )
-            return r.json()  # type: ignore[no-any-return]
+        # create symlink to file in workdir
+        workpath = self.path / r.json()["bma_response"]["links"]["downloads"]["original"][1:]
+        if not workpath.exists():
+            workpath.symlink_to(path)
+
+        return r.json()  # type: ignore[no-any-return]
 
     def handle_job(self, job: Job) -> None:
         """Do the thing and upload the result."""
-        # make sure the source file for the job is available
-        # do it
-        result: JobResult
+        source = self._download_job_source(job)
         if isinstance(job, ImageConversionJob | ThumbnailJob):
-            source = self.download_job_source(job)
-            result = self.handle_image_conversion_job(job=job, orig=source)
+            self._handle_image_conversion_job(job=job, orig=source)
             filename = f"{job.job_uuid}.{job.filetype.lower()}"
 
         elif isinstance(job, ImageExifExtractionJob):
-            source = self.download_job_source(job)
-            result = self.get_exif(fname=source)
+            job.exifdict = self.get_exif(fname=source)
             filename = "exif.json"
 
         elif isinstance(job, ThumbnailSourceJob):
             info = self.get_file_info(file_uuid=job.basefile_uuid)
-            if info["filetype"] != "image":
-                raise JobNotSupportedError(job=job)
-            source = self.download_job_source(job)
-            result = self.create_thumbnail_source(job=job)
+            self._handle_thumbnail_source_job(job=job, fileinfo=info)
             filename = job.source_url
 
         else:
             raise JobNotSupportedError(job=job)
 
-        self.write_and_upload_result(job=job, result=result, filename=filename)
+        self._write_and_upload_result(job=job, filename=filename)
 
-    def write_and_upload_result(self, job: Job, result: "JobResult", filename: str) -> None:
-        """Encode and write the job result to a buffer, then upload."""
-        with BytesIO() as buf:
-            metadata: dict[str, int | str] = {}
-            if isinstance(job, ImageConversionJob | ThumbnailJob):
-                image, exif = result
-                if not isinstance(image[0], Image.Image) or not isinstance(exif, Image.Exif):
-                    raise TypeError("Fuck")
-                # apply format specific encoding options
-                kwargs = {}
-                if job.mimetype in self.settings["encoding"]["images"]:
-                    # this format has custom encoding options, like quality/lossless, apply them
-                    kwargs.update(self.settings["encoding"]["images"][job.mimetype])
-                    logger.debug(f"Format {job.mimetype} has custom encoding settings, kwargs is now: {kwargs}")
-                else:
-                    logger.debug(f"No custom settings for format {job.mimetype}")
-                # sequence?
-                if len(image) > 1:
-                    kwargs["append_images"] = image[1:]
-                    kwargs["save_all"] = True
-                image[0].save(buf, format=job.filetype, exif=exif, **kwargs)
-                metadata = {"width": image[0].width, "height": image[0].height, "mimetype": job.mimetype}
-
-            elif isinstance(job, ImageExifExtractionJob):
-                logger.debug(f"Got exif data {result}")
-                buf.write(json.dumps(result).encode())
-
-            elif isinstance(job, ThumbnailSourceJob):
-                image, exif = result
-                if not isinstance(image[0], Image.Image) or not isinstance(exif, Image.Exif):
-                    raise TypeError("Fuck")
-                kwargs = {}
-                # thumbnailsources are always WEBP
-                if "image/webp" in self.settings["encoding"]["images"]:
-                    kwargs.update(self.settings["encoding"]["images"]["image/webp"])
-                # sequence?
-                if len(image) > 1:
-                    kwargs["append_images"] = image[1:]
-                    kwargs["save_all"] = True
-                image[0].save(buf, format="WEBP", **kwargs)
-                metadata = {"width": 500, "height": image[0].height, "mimetype": "image/webp"}
-
-            else:
-                logger.error("Unsupported job type")
-                raise JobNotSupportedError(job=job)
-
-            self.upload_job_result(job=job, buf=buf, filename=filename, metadata=metadata)
-
-    def handle_image_conversion_job(
-        self, job: ImageConversionJob, orig: Path, crop_center: tuple[float, float] = (0.5, 0.5)
-    ) -> "ImageConversionJobResult":
-        """Handle image conversion job."""
-        start = time.time()
-        logger.debug(f"Opening original image {orig}...")
-        image = Image.open(orig)
-        logger.debug(
-            f"Opening {orig.stat().st_size} bytes {image.size} source image took {time.time() - start} seconds"
-        )
-
-        logger.debug("Rotating image (if needed)...")
-        start = time.time()
-        ImageOps.exif_transpose(image, in_place=True)  # creates a copy with rotation normalised
-        if image is None:
-            raise ValueError("NoImage")
-        orig_ar = Fraction(*image.size)
-        logger.debug(
-            f"Rotating image took {time.time() - start} seconds, image is now {image.size} original AR is {orig_ar}"
-        )
-
-        logger.debug("Getting exif metadata from image...")
-        start = time.time()
-        exif = image.getexif()
-        logger.debug(f"Getting exif data took {time.time() - start} seconds")
-
-        size = int(job.width), int(job.height)
-        ratio = Fraction(*size)
-
-        if job.custom_aspect_ratio:
-            orig_str = "custom"
-        else:
-            orig_str = "original"
-            if orig_ar != ratio:
-                orig_str += "(ish)"
-
-        logger.debug(f"Desired image size is {size}, aspect ratio: {ratio} ({orig_str}), converting image...")
-        start = time.time()
-        images = transform_image(original_img=image, crop_w=size[0], crop_h=size[1])
-        logger.debug(f"Result image size is {images[0].width}*{images[0].height}")
-        logger.debug(f"Converting image size and AR took {time.time() - start} seconds")
-
-        logger.debug("Done, returning result...")
-        return images, exif
-
-    def upload_job_result(
-        self,
-        job: Job,
-        buf: "BytesIO",
-        filename: str,
-        metadata: dict[str, str | int] | None = None,
-    ) -> dict[str, str]:
-        """Upload the result of a job."""
-        size = buf.getbuffer().nbytes
-        logger.debug(f"Uploading {size} bytes result for job {job.job_uuid} with filename {filename}")
-        start = time.time()
-        files = {"f": (filename, buf)}
-        data = {"client": json.dumps(self.clientjson)}
-        if isinstance(job, ThumbnailJob | ThumbnailSourceJob | ImageConversionJob):
-            # Image generating jobs needs a metadata object as well
-            data["metadata"] = json.dumps(metadata)
-        # doit
-        r = self.client.post(
-            self.base_url + f"/api/v1/json/jobs/{job.job_uuid}/result/",
-            data=data,
-            files=files,
-        ).raise_for_status()
-        t = time.time() - start
-        logger.debug(f"Done, it took {t} seconds to upload {size} bytes, speed {round(size/t)} bytes/sec")
-        return r.json()  # type: ignore[no-any-return]
-
-    def get_exif(self, fname: Path) -> "ExifExtractionJobResult":
+    def get_exif(self, fname: Path) -> dict[str, dict[str, str]]:
         """Return a dict with exif data as read by exifread from the file.
 
         exifread returns a flat dict of key: value pairs where the key
@@ -403,8 +437,3 @@ class BmaClient:
         }
         r = self.client.post(url, json=data).raise_for_status()
         return r.json()["bma_response"]  # type: ignore[no-any-return]
-
-    def create_thumbnail_source(self, job: ThumbnailSourceJob) -> "ThumbnailSourceJobResult":
-        """Create a thumbnail source for this file."""
-        # unsupported filetype
-        raise JobNotSupportedError(job=job)
