@@ -378,6 +378,7 @@ class BmaClient:
         # create symlink to file in workdir
         workpath = self.path / r.json()["bma_response"]["links"]["downloads"]["original"][1:]
         if not workpath.exists():
+            workpath.parent.mkdir(exist_ok=True)
             workpath.symlink_to(path)
 
         return r.json()  # type: ignore[no-any-return]
