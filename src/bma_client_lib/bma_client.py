@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 import cv2
 import exifread
+import ffmpeg
 import httpx
 import magic
 import pymupdf
@@ -186,6 +187,17 @@ class BmaClient:
             exif[0x131] = self.clientinfo["client_version"]
             job.exif = exif
             return
+        if fileinfo["filetype"] == "audio":
+            # use ffmpeg to generate a picture of the waveform
+            ss = self._get_audio_screenshot(job=job)
+            job.images = [ss]
+            exif = Image.Exif()
+            exif[0x100] = job.images[0].width
+            exif[0x101] = job.images[0].height
+            exif[0x10E] = f"ThumbnailSource for BMA audio file {job.basefile_uuid}"
+            exif[0x131] = self.clientinfo["client_version"]
+            job.exif = exif
+            return
 
         # unsupported filetype
         raise JobNotSupportedError(job=job)
@@ -216,6 +228,19 @@ class BmaClient:
         pdfpage = doc[page]
         pix = pdfpage.get_pixmap()
         return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+
+    def _get_audio_screenshot(self, job: ThumbnailSourceJob) -> Image.Image:
+        """Get a waveform screenshot. Requires ffmpeg as external dep."""
+        path = self.path / job.source_url[1:]
+        output, _ = (
+            ffmpeg.input(str(path))
+            .filter("compand")
+            .filter("showwavespic", s="1000x1000", split_channels=1)
+            .output("pipe:", format="webp", vframes="1")
+            # .overwrite_output()
+            .run(capture_stdout=True)
+        )
+        return Image.open(BytesIO(output))
 
     ###############################################################################
 
