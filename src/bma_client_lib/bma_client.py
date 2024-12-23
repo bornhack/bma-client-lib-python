@@ -297,7 +297,7 @@ class BmaClient:
         size = buf.getbuffer().nbytes
         logger.debug(f"Uploading {size} bytes result for job {job.job_uuid} with filename {filename}")
         start = time.time()
-        files = {"f": (filename, buf)}
+        files = {"data": (filename, buf)}
         data = {"client": json.dumps(self.clientinfo)}
         if isinstance(job, ThumbnailJob | ThumbnailSourceJob | ImageConversionJob):
             # Image generating jobs needs a metadata object as well
@@ -398,7 +398,7 @@ class BmaClient:
 
         # open file
         with path.open("rb") as fh:
-            files = {"f": (path.name, fh)}
+            files = {"file_data": (path.name, fh)}
             # build metadata
             data = {
                 "attribution": attribution,
@@ -415,14 +415,14 @@ class BmaClient:
             # doit
             r = self.client.post(
                 self.base_url + "/api/v1/json/files/upload/",
-                data={"f_metadata": json.dumps(data), "client": json.dumps(self.clientinfo)},
+                data={"file_metadata": json.dumps(data), "client": json.dumps(self.clientinfo)},
                 files=files,
                 timeout=30,
             )
         # create symlink to file in workdir
         workpath = self.path / r.json()["bma_response"]["links"]["downloads"]["original"][1:]
         if not workpath.exists():
-            workpath.parent.mkdir(exist_ok=True)
+            workpath.parent.mkdir(parents=True, exist_ok=True)
             workpath.symlink_to(path)
 
         return r.json()  # type: ignore[no-any-return]
