@@ -390,10 +390,11 @@ class BmaClient:
                 rotated = ImageOps.exif_transpose(image)  # creates a copy with rotation normalised
                 if rotated is None:
                     raise ValueError("Rotation")
-                logger.debug(
-                    f"Image has exif rotation info, using post-rotate size {rotated.size} "
-                    f"instead of raw size {image.size}"
-                )
+                if rotated.size != image.size:
+                    logger.debug(
+                        f"Image has exif rotation info, using post-rotate size {rotated.size} "
+                        f"instead of raw size {image.size}"
+                    )
                 width, height = rotated.size
 
         # open file
