@@ -101,7 +101,7 @@ class BmaClient:
         self.access_token = data["access_token"]
         logger.warning(f"got new access_token: {self.access_token}")
         self.auth = BmaBearerAuth(token=self.access_token)
-        self.client = httpx.Client(auth=self.auth, timeout=None)
+        self.client = httpx.Client(auth=self.auth, timeout=None)  # noqa: S113
 
     def _download_job_source(self, job: Job) -> Path:
         """Download the file needed to do a job."""
