@@ -51,6 +51,8 @@ class ImageConversionJob(BaseImageResultJob):
     height: int
     mimetype: str
     custom_aspect_ratio: bool
+    crop_center_x: int
+    crop_center_y: int
 
 
 @dataclass(kw_only=True)

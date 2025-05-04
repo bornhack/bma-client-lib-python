@@ -156,7 +156,7 @@ class BmaClient:
 
         logger.debug(f"Desired image size is {size}, aspect ratio: {ratio} ({orig_str}), converting image...")
         start = time.time()
-        job.images = transform_image(original_img=image, crop_w=size[0], crop_h=size[1])
+        job.images = transform_image(original_img=image, crop_w=size[0], crop_h=size[1], center_point=crop_center)
         logger.debug(f"Result image size is {job.images[0].width}*{job.images[0].height}")
         logger.debug(f"Converting image size and AR took {time.time() - start} seconds")
         logger.debug("Done.")
